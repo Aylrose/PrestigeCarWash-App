@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { supabase, type FeedbackRow, type FeedbackPayload } from "@/lib/supabase";
+import { offlineDB } from "@/lib/offline-db";
+import { startSyncListener, syncPendingFeedback } from "@/lib/sync";
 import { COLORS, blankAnswers, type Answers } from "@/lib/constants";
 import { Kiosk } from "@/components/Kiosk";
 import { AdminLogin } from "@/components/AdminLogin";
@@ -12,6 +14,12 @@ export default function App() {
   const [responses, setResponses] = useState<FeedbackRow[]>([]);
   const [loaded, setLoaded] = useState(false);
 
+  useEffect(() => {
+  const cleanup = startSyncListener();
+
+  return cleanup;
+}, []);
+
   const loadResponses = useCallback(async () => {
     try {
       const { data, error } = await supabase
@@ -20,38 +28,51 @@ export default function App() {
         .order("timestamp", { ascending: false });
       if (error) throw error;
       setResponses((data as FeedbackRow[]) || []);
-    } catch {
-      setResponses([]);
-    } finally {
+    } catch (error) {
+  console.error("Erreur lors du chargement des réponses :", error);
+  setResponses([]);
+} finally {
       setLoaded(true);
     }
   }, []);
 
   useEffect(() => { loadResponses(); }, [loadResponses]);
 
-  const handleSubmit = useCallback(async (answers: Answers) => {
-    const payload: FeedbackPayload = {
-      accueil: answers.accueil,
-      lavage: answers.lavage,
-      lavage_detail: answers.lavageDetail,
-      attente: answers.attente,
-      lounge: answers.lounge,
-      qualite_prix: answers.qualitePrix,
-      nps: answers.nps,
-      commentaire: answers.commentaire,
-    };
-    try {
-      const { data, error } = await supabase
-        .from("prestige_feedback")
-        .insert(payload)
-        .select()
-        .single();
-      if (error) throw error;
-      if (data) setResponses((prev) => [data as FeedbackRow, ...prev]);
-    } catch {
-      // submission failed silently — kiosk still shows thanks screen
+const handleSubmit = useCallback(async (answers: Answers) => {
+  const syncId = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+
+  const payload: FeedbackPayload = {
+    sync_id: syncId,
+    accueil: answers.accueil,
+    lavage: answers.lavage,
+    lavage_detail: answers.lavageDetail,
+    attente: answers.attente,
+    lounge: answers.lounge,
+    qualite_prix: answers.qualitePrix,
+    nps: answers.nps,
+    commentaire: answers.commentaire,
+  };
+
+  try {
+    await offlineDB.feedback.add({
+      ...payload,
+      createdAt,
+      status: "pending",
+    });
+
+    if (navigator.onLine) {
+      await syncPendingFeedback();
     }
-  }, []);
+
+    await loadResponses();
+  } catch (error) {
+    console.error(
+      "Impossible d'enregistrer le questionnaire localement :",
+      error
+    );
+  }
+}, [loadResponses]);
 
   const handleReset = useCallback(async () => {
     if (!window.confirm("Effacer toutes les réponses stockées ?")) return;

@@ -16,7 +16,7 @@ export function ScreenWelcome({ onStart, onSecretTap }: { onStart: () => void; o
         </div>
         <p style={{ fontSize: 21, lineHeight: 1.6, color: COLORS.text, maxWidth: 560, margin: "0 auto 40px" }}>
           Bienvenue chez Prestige Car Wash. Parce que votre exigence est notre priorité,
-          votre avis vaut de l'or. Prêtez-nous <strong>45 secondes</strong> pour sublimer
+          votre avis vaut de l'or. Prêtez-nous <strong>quelques secondes</strong> pour sublimer
           votre prochaine expérience.
         </p>
         <button

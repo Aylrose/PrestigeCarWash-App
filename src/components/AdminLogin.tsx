@@ -36,7 +36,7 @@ export function AdminLogin({ onAuth, onClose }: { onAuth: () => void; onClose: (
               Entrer
             </button>
             <div style={{ color: COLORS.textMuted, fontSize: 11, marginTop: 14 }}>
-              Démo : mot de passe <code></code>
+              {/*Démo : mot de passe <code></code> */}
             </div>
           </div>
         </Chrome>
