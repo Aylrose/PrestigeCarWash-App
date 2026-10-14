@@ -21,3 +21,9 @@ dist-ssr
 *.sln
 *.sw?
 .env
+
+# Moteur SQLite WebAssembly copié par scripts/copy-sql-wasm.mjs (postinstall)
+public/assets/sql-wasm.wasm
+
+# Réponses historiques des clients (commentaires) : à conserver uniquement en local
+src/data/supabaseSeed.json

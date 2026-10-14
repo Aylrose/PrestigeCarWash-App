@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Star, Clock, Coffee, ThumbsUp, ThumbsDown, MessageSquare, Droplets, Gem, Wallet, Frown, Sparkles, Send, ChevronLeft } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { Clock, Coffee, ThumbsUp, ThumbsDown, MessageSquare, Droplets, Gem, Wallet, Frown, Sparkles, Send, ChevronLeft } from "lucide-react";
 import { COLORS, TOTAL_QUESTIONS, blankAnswers, type Answers } from "@/lib/constants";
 import { Logo } from "@/components/Logo";
 import { BigButton, ProgressDots, QuestionTitle, ScreenShell, StarPicker } from "@/components/ui";
@@ -253,11 +253,14 @@ export function ScreenThanks() {
 
 /* ---------- Kiosk controller ---------- */
 export function Kiosk({ onSubmit, onOpenAdmin }: {
-  onSubmit: (a: Answers) => void;
+  /** Résout une fois la réponse écrite en base locale ; rejette en cas d'échec. */
+  onSubmit: (a: Answers) => Promise<void>;
   onOpenAdmin: () => void;
 }) {
   const [screen, setScreen] = useState(0);
   const [answers, setAnswers] = useState<Answers>(blankAnswers());
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tapCount = useRef(0);
   const tapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -265,9 +268,20 @@ export function Kiosk({ onSubmit, onOpenAdmin }: {
   const goNext = () => setScreen((s) => Math.min(s + 1, 8));
   const goBack = () => setScreen((s) => Math.max(s - 1, 0));
 
-  const finish = () => {
-    onSubmit(answers);
-    setScreen(8);
+  // L'écran de remerciement n'apparaît qu'après une écriture réussie.
+  const finish = async () => {
+    if (saving) return;
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await onSubmit(answers);
+      setScreen(8);
+    } catch (error) {
+      console.error("Impossible d'enregistrer le questionnaire :", error);
+      setSaveError("Votre avis n'a pas pu être enregistré. Merci de réessayer ou de prévenir un membre de l'équipe.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   useEffect(() => {
@@ -368,10 +382,17 @@ export function Kiosk({ onSubmit, onOpenAdmin }: {
         {screen === 7 && <ScreenCommentaire value={answers.commentaire} onChange={(v) => setAnswers((a) => ({ ...a, commentaire: v }))} />}
         {screen === 8 && <ScreenThanks />}
 
+        {screen === 7 && saveError && (
+          <div role="alert" style={{ marginTop: 22, maxWidth: 760, width: "100%", padding: "12px 16px", borderRadius: 12, background: "rgba(229,83,75,0.15)", border: `1px solid ${COLORS.red}`, color: COLORS.text, fontSize: 14 }}>
+            {saveError}
+          </div>
+        )}
+
         {screen > 0 && screen < 8 && (
           <div style={{ display: "flex", gap: 14, marginTop: 34, width: "100%", maxWidth: 760, justifyContent: "space-between" }}>
             <button
               onClick={goBack}
+              disabled={saving}
               style={{
                 background: "none", border: "1px solid rgba(255,255,255,0.15)", color: COLORS.textMuted,
                 borderRadius: 999, padding: "12px 20px", cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
@@ -381,7 +402,7 @@ export function Kiosk({ onSubmit, onOpenAdmin }: {
             </button>
             <button
               onClick={screen === 7 ? finish : goNext}
-              disabled={!canNext()}
+              disabled={!canNext() || saving}
               style={{
                 border: "none",
                 borderRadius: 999,
@@ -395,7 +416,7 @@ export function Kiosk({ onSubmit, onOpenAdmin }: {
                 display: "flex", alignItems: "center", gap: 8,
               }}
             >
-              {screen === 7 ? (<><Send size={16} /> Terminer & Soumettre</>) : "Suivant"}
+              {screen === 7 ? (<><Send size={16} /> {saving ? "Enregistrement…" : "Terminer & Soumettre"}</>) : "Suivant"}
             </button>
           </div>
         )}
@@ -409,5 +430,3 @@ export function Kiosk({ onSubmit, onOpenAdmin }: {
     </div>
   );
 }
-
-import { useEffect, useRef } from "react";

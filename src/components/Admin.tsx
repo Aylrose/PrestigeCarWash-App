@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
-import { Filesystem, Directory } from "@capacitor/filesystem";
+import { Filesystem, Directory, Encoding } from "@capacitor/filesystem";
 import { Share } from "@capacitor/share";
 import {
   PieChart,
@@ -17,10 +17,29 @@ import {
   Line,
   Legend,
 } from "recharts";
-import { BarChart3, RefreshCw, Download } from "lucide-react";
+import { BarChart3, Download, Upload, Database, Search, Trash2, X } from "lucide-react";
 import { COLORS } from "@/lib/constants";
 import { Chrome } from "@/components/ui";
-import type { FeedbackRow } from "@/lib/supabase";
+import type { FeedbackRow, ImportReport, MigrationStatus } from "@/lib/feedbackTypes";
+import {
+  deleteFeedback,
+  exportBackup,
+  getAllFeedback,
+  getMigrationStatus,
+  restoreBackup,
+} from "@/lib/feedbackRepository";
+import { backupFileName } from "@/lib/backup";
+import {
+  PDF_HEAD,
+  XLSX_HEADERS,
+  computeStats,
+  filterResponses,
+  formatDate,
+  label,
+  pdfRows,
+  periodRange,
+  xlsxRows,
+} from "@/lib/feedbackStats";
 
 const btnGhost: React.CSSProperties = {
   background: "transparent",
@@ -47,6 +66,12 @@ const btnPrimary: React.CSSProperties = {
   alignItems: "center",
 };
 
+const btnDanger: React.CSSProperties = {
+  ...btnGhost,
+  borderColor: COLORS.red,
+  color: COLORS.red,
+};
+
 const inputStyle: React.CSSProperties = {
   background: COLORS.panel2,
   border: "1px solid rgba(255,255,255,0.15)",
@@ -62,32 +87,57 @@ const chartTitle: React.CSSProperties = {
   fontSize: 14,
 };
 
-function periodFilter(
-  period: string,
-  custom: { from: string; to: string }
-) {
-  const now = new Date();
-  const start = new Date(now);
+const mutedText: React.CSSProperties = {
+  color: COLORS.textMuted,
+  fontSize: 12,
+};
 
-  if (period === "jour") {
-    start.setHours(0, 0, 0, 0);
-  } else if (period === "semaine") {
-    start.setDate(now.getDate() - 7);
-  } else if (period === "mois") {
-    start.setMonth(now.getMonth() - 1);
-  } else if (period === "custom" && custom.from) {
-    return {
-      from: new Date(custom.from),
-      to: custom.to ? new Date(custom.to) : now,
-    };
-  } else {
-    return null;
+const IMPORT_STATUS_LABEL: Record<ImportReport["status"], string> = {
+  never: "Jamais lancé",
+  running: "En cours…",
+  success: "Réussi",
+  partial: "Partiel — à relancer",
+  error: "Échec",
+  interrupted: "Interrompu — à relancer",
+};
+
+const SOURCE_LABEL: Record<FeedbackRow["source"], string> = {
+  local: "Saisie locale",
+  supabase: "Historique (ancienne base Supabase)",
+  legacy_offline: "Ancienne file hors ligne",
+  backup: "Restaurée (sauvegarde)",
+};
+
+/**
+ * Enregistre un fichier puis ouvre le partage (Android), ou le télécharge (navigateur).
+ * `data` est en base64, sauf si `utf8` est vrai.
+ */
+async function saveAndShare(opts: {
+  fileName: string;
+  data: string;
+  utf8?: boolean;
+  text: string;
+  dialogTitle: string;
+  browserDownload: () => void;
+}) {
+  if (Capacitor.isNativePlatform()) {
+    const result = await Filesystem.writeFile({
+      path: opts.fileName,
+      data: opts.data,
+      directory: Directory.Documents,
+      ...(opts.utf8 ? { encoding: Encoding.UTF8 } : {}),
+    });
+
+    await Share.share({
+      title: "Prestige Feedback",
+      text: opts.text,
+      url: result.uri,
+      dialogTitle: opts.dialogTitle,
+    });
+    return;
   }
 
-  return {
-    from: start,
-    to: now,
-  };
+  opts.browserDownload();
 }
 
 function StatCard({
@@ -142,129 +192,129 @@ function StatCard({
   );
 }
 
-export function Admin({
-  responses,
+function DetailField({ name, value }: { name: string; value: React.ReactNode }) {
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 10, padding: "6px 0", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+      <div style={mutedText}>{name}</div>
+      <div style={{ color: COLORS.text, fontSize: 14, wordBreak: "break-word" }}>{value === "" || value == null ? "—" : value}</div>
+    </div>
+  );
+}
+
+function DetailModal({
+  row,
   onClose,
-  onReset,
+  onDelete,
+  deleting,
 }: {
-  responses: FeedbackRow[];
+  row: FeedbackRow;
   onClose: () => void;
-  onReset: () => void;
+  onDelete: () => void;
+  deleting: boolean;
 }) {
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.65)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 16,
+        zIndex: 50,
+      }}
+    >
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 560, maxHeight: "90vh", overflowY: "auto" }}>
+        <Chrome>
+          <div style={{ padding: 22 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <div style={chartTitle}>Détail de la réponse</div>
+              <button onClick={onClose} style={{ ...btnGhost, padding: 6 }} aria-label="Fermer">
+                <X size={16} />
+              </button>
+            </div>
+
+            <DetailField name="Date" value={formatDate(row.timestamp)} />
+            <DetailField name="Accueil" value={row.accueil != null ? `${row.accueil} / 5` : ""} />
+            <DetailField name="Lavage" value={label(row.lavage)} />
+            <DetailField name="Détails lavage" value={(row.lavage_detail || []).map(label).join(", ")} />
+            <DetailField name="Attente" value={label(row.attente)} />
+            <DetailField name="Coffee Lounge" value={row.lounge != null ? `${row.lounge} / 5` : ""} />
+            <DetailField name="Qualité / prix" value={label(row.qualite_prix)} />
+            <DetailField name="Recommandation" value={label(row.nps)} />
+            <DetailField name="Commentaire" value={row.commentaire} />
+            <DetailField name="Origine" value={SOURCE_LABEL[row.source]} />
+            <DetailField name="Identifiant" value={<span style={{ fontFamily: "monospace", fontSize: 12 }}>{row.id}</span>} />
+
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 18 }}>
+              <button onClick={onDelete} disabled={deleting} style={{ ...btnDanger, opacity: deleting ? 0.5 : 1 }}>
+                <Trash2 size={14} style={{ marginRight: 6 }} />
+                {deleting ? "Suppression…" : "Supprimer cette réponse"}
+              </button>
+            </div>
+          </div>
+        </Chrome>
+      </div>
+    </div>
+  );
+}
+
+export function Admin({ onClose }: { onClose: () => void }) {
+  const [responses, setResponses] = useState<FeedbackRow[]>([]);
+  const [status, setStatus] = useState<MigrationStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<null | "backup" | "restore" | "delete">(null);
+  const [notice, setNotice] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [selected, setSelected] = useState<FeedbackRow | null>(null);
+  const [search, setSearch] = useState("");
+  const [listLimit, setListLimit] = useState(50);
+  const fileInput = useRef<HTMLInputElement>(null);
+
   const [period, setPeriod] = useState("mois");
   const [custom, setCustom] = useState({
     from: "",
     to: "",
   });
 
-  const range = periodFilter(period, custom);
+  // Les données affichées proviennent exclusivement de la base SQLite locale.
+  const load = useCallback(async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const [rows, st] = await Promise.all([getAllFeedback(), getMigrationStatus()]);
+      setResponses(rows);
+      setStatus(st);
+    } catch (error) {
+      console.error("Erreur lors du chargement des réponses :", error);
+      setLoadError(
+        `Impossible de lire la base locale : ${error instanceof Error ? error.message : String(error)}`
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  const filtered = !range
-    ? responses
-    : responses.filter((r) => {
-        const t = new Date(r.timestamp);
+  useEffect(() => {
+    void load();
+  }, [load]);
 
-        return t >= range.from && t <= range.to;
-      });
+  const range = periodRange(period, custom);
+  const filtered = filterResponses(responses, range, search);
 
-  const avg = (key: "accueil" | "lounge") => {
-    const vals = filtered
-      .map((r) => r[key])
-      .filter((v): v is number => typeof v === "number");
-
-    return vals.length
-      ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1)
-      : "–";
-  };
-
-  const npsOui = filtered.filter(
-    (r) => r.nps === "oui"
-  ).length;
-
-  const npsTotal = filtered.filter(
-    (r) => r.nps != null
-  ).length;
-
-  const npsRate = npsTotal
-    ? Math.round((npsOui / npsTotal) * 100)
-    : 0;
-
-  const lavageData = [
-    {
-      name: "Impeccable",
-      value: filtered.filter(
-        (r) => r.lavage === "impeccable"
-      ).length,
-    },
-    {
-      name: "Plutôt satisfait",
-      value: filtered.filter(
-        (r) => r.lavage === "satisfait"
-      ).length,
-    },
-    {
-      name: "Insatisfait",
-      value: filtered.filter(
-        (r) => r.lavage === "insatisfait"
-      ).length,
-    },
-  ];
-
-  const attenteData = [
-    {
-      name: "Rapide",
-      value: filtered.filter(
-        (r) => r.attente === "rapide"
-      ).length,
-    },
-    {
-      name: "Un peu long",
-      value: filtered.filter(
-        (r) => r.attente === "peu_long"
-      ).length,
-    },
-    {
-      name: "Trop long",
-      value: filtered.filter(
-        (r) => r.attente === "trop_long"
-      ).length,
-    },
-  ];
-
-  const prixData = [
-    {
-      name: "Avantageux",
-      value: filtered.filter(
-        (r) => r.qualite_prix === "avantageux"
-      ).length,
-    },
-    {
-      name: "Correct",
-      value: filtered.filter(
-        (r) => r.qualite_prix === "correct"
-      ).length,
-    },
-    {
-      name: "Trop cher",
-      value: filtered.filter(
-        (r) => r.qualite_prix === "cher"
-      ).length,
-    },
-  ];
-
-  const byDay: Record<string, number> = {};
-
-  filtered.forEach((r) => {
-    const day = r.timestamp.slice(0, 10);
-    byDay[day] = (byDay[day] || 0) + 1;
-  });
-
-  const trend = Object.entries(byDay)
-    .sort()
-    .map(([day, count]) => ({
-      day: day.slice(5),
-      count,
-    }));
+  const {
+    avgAccueil,
+    avgLounge,
+    npsOui,
+    npsTotal,
+    npsRate,
+    lavageData,
+    attenteData,
+    prixData,
+    trend,
+  } = computeStats(filtered);
 
   const PIE_COLORS = [
     COLORS.green,
@@ -333,37 +383,9 @@ export function Admin({
         63
       );
 
-      const head = [
-        [
-          "Date",
-          "Accueil",
-          "Lavage",
-          "Détails",
-          "Attente",
-          "Lounge",
-          "Qualité/Prix",
-          "Recommandation",
-          "Commentaire",
-        ],
-      ];
-
-      const body = filtered.map((r) => [
-        new Date(r.timestamp).toLocaleString(
-          "fr-FR"
-        ),
-        r.accueil ?? "",
-        r.lavage ?? "",
-        (r.lavage_detail || []).join(", "),
-        r.attente ?? "",
-        r.lounge ?? "",
-        r.qualite_prix ?? "",
-        r.nps ?? "",
-        r.commentaire || "",
-      ]);
-
       autoTable(doc, {
-        head,
-        body,
+        head: [PDF_HEAD],
+        body: pdfRows(filtered),
         startY: 105,
         styles: {
           fontSize: 8,
@@ -381,37 +403,13 @@ export function Admin({
 
       const fileName = `prestige-feedback-${Date.now()}.pdf`;
 
-      // =====================================================
-      // ANDROID / CAPACITOR
-      // =====================================================
-
-      if (Capacitor.isNativePlatform()) {
-        const base64 = doc
-          .output("datauristring")
-          .split(",")[1];
-
-        const result = await Filesystem.writeFile({
-          path: fileName,
-          data: base64,
-          directory: Directory.Documents,
-        });
-
-        await Share.share({
-          title: "Prestige Feedback",
-          text: "Rapport PDF Prestige Feedback",
-          url: result.uri,
-          dialogTitle:
-            "Partager ou enregistrer le PDF",
-        });
-
-        return;
-      }
-
-      // =====================================================
-      // NAVIGATEUR / PC
-      // =====================================================
-
-      doc.save(fileName);
+      await saveAndShare({
+        fileName,
+        data: doc.output("datauristring").split(",")[1],
+        text: "Rapport PDF Prestige Feedback",
+        dialogTitle: "Partager ou enregistrer le PDF",
+        browserDownload: () => doc.save(fileName),
+      });
     } catch (error) {
       console.error(
         "Erreur export PDF :",
@@ -432,35 +430,9 @@ export function Admin({
     try {
       const XLSX = await import("xlsx");
 
-      const headers = [
-        "id",
-        "date",
-        "accueil",
-        "lavage",
-        "lavage_detail",
-        "attente",
-        "lounge",
-        "qualite_prix",
-        "recommandation",
-        "commentaire",
-      ];
-
-      const rows = filtered.map((r) => [
-        r.id,
-        r.timestamp,
-        r.accueil ?? "",
-        r.lavage ?? "",
-        (r.lavage_detail || []).join("|"),
-        r.attente ?? "",
-        r.lounge ?? "",
-        r.qualite_prix ?? "",
-        r.nps ?? "",
-        r.commentaire || "",
-      ]);
-
       const ws = XLSX.utils.aoa_to_sheet([
-        headers,
-        ...rows,
+        XLSX_HEADERS,
+        ...xlsxRows(filtered),
       ]);
 
       const wb = XLSX.utils.book_new();
@@ -473,38 +445,15 @@ export function Admin({
 
       const fileName = `prestige-feedback-${Date.now()}.xlsx`;
 
-      // =====================================================
-      // ANDROID / CAPACITOR
-      // =====================================================
-
-      if (Capacitor.isNativePlatform()) {
-        const base64 = XLSX.write(wb, {
-          bookType: "xlsx",
-          type: "base64",
-        });
-
-        const result = await Filesystem.writeFile({
-          path: fileName,
-          data: base64,
-          directory: Directory.Documents,
-        });
-
-        await Share.share({
-          title: "Prestige Feedback",
-          text: "Fichier Excel Prestige Feedback",
-          url: result.uri,
-          dialogTitle:
-            "Partager ou enregistrer le fichier Excel",
-        });
-
-        return;
-      }
-
-      // =====================================================
-      // NAVIGATEUR / PC
-      // =====================================================
-
-      XLSX.writeFile(wb, fileName);
+      await saveAndShare({
+        fileName,
+        data: Capacitor.isNativePlatform()
+          ? XLSX.write(wb, { bookType: "xlsx", type: "base64" })
+          : "",
+        text: "Fichier Excel Prestige Feedback",
+        dialogTitle: "Partager ou enregistrer le fichier Excel",
+        browserDownload: () => XLSX.writeFile(wb, fileName),
+      });
     } catch (error) {
       console.error(
         "Erreur export Excel :",
@@ -516,6 +465,86 @@ export function Admin({
       );
     }
   };
+
+  // =========================================================
+  // SAUVEGARDE / RESTAURATION / IMPORT / SUPPRESSION
+  // =========================================================
+
+  const handleBackup = async () => {
+    setBusy("backup");
+    setNotice(null);
+    try {
+      const backup = await exportBackup();
+      const json = JSON.stringify(backup, null, 2);
+      const fileName = backupFileName();
+      await saveAndShare({
+        fileName,
+        data: json,
+        utf8: true,
+        text: "Sauvegarde complète Prestige Feedback",
+        dialogTitle: "Enregistrer la sauvegarde en lieu sûr",
+        browserDownload: () => {
+          const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = fileName;
+          a.click();
+          URL.revokeObjectURL(url);
+        },
+      });
+      setNotice({ kind: "ok", text: `Sauvegarde créée : ${backup.count} réponse(s) (${fileName}).` });
+    } catch (error) {
+      console.error("Erreur sauvegarde :", error);
+      setNotice({ kind: "error", text: `Échec de la sauvegarde : ${error instanceof Error ? error.message : String(error)}` });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const handleRestoreFile = async (file: File | undefined) => {
+    if (!file) return;
+    setBusy("restore");
+    setNotice(null);
+    try {
+      const result = await restoreBackup(await file.text());
+      setNotice({
+        kind: result.invalid || result.missingAfterImport ? "error" : "ok",
+        text:
+          `Restauration : ${result.fetched} réponse(s) dans le fichier, ${result.inserted} ajoutée(s), ` +
+          `${result.alreadyPresent} déjà présente(s)` +
+          (result.invalid ? `, ${result.invalid} invalide(s) : ${result.errors.join(" ; ")}` : "") +
+          (result.missingAfterImport ? `, ${result.missingAfterImport} non retrouvée(s) après écriture` : "") +
+          ".",
+      });
+      await load();
+    } catch (error) {
+      console.error("Erreur restauration :", error);
+      setNotice({ kind: "error", text: `Restauration impossible : ${error instanceof Error ? error.message : String(error)}` });
+    } finally {
+      setBusy(null);
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  };
+
+  const handleDelete = async (row: FeedbackRow) => {
+    if (!window.confirm(`Supprimer définitivement la réponse du ${formatDate(row.timestamp)} ?`)) return;
+    setBusy("delete");
+    try {
+      const removed = await deleteFeedback(row.id);
+      setSelected(null);
+      setNotice(removed
+        ? { kind: "ok", text: "Réponse supprimée." }
+        : { kind: "error", text: "Cette réponse n'existe plus dans la base locale." });
+      await load();
+    } catch (error) {
+      setNotice({ kind: "error", text: `Suppression impossible : ${error instanceof Error ? error.message : String(error)}` });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const hist = status?.historicalImport;
+  const legacy = status?.legacyOfflineImport;
 
   return (
     <div
@@ -567,8 +596,9 @@ export function Admin({
                 fontSize: 12,
               }}
             >
-              {filtered.length} réponse(s) sur la
-              période sélectionnée
+              {loading
+                ? "Chargement des données locales…"
+                : `${filtered.length} réponse(s) sur la période sélectionnée · ${responses.length} au total sur l'appareil`}
             </div>
           </div>
         </div>
@@ -585,17 +615,6 @@ export function Admin({
             style={btnGhost}
           >
             Retour au kiosque
-          </button>
-
-          <button
-            onClick={onReset}
-            style={btnGhost}
-          >
-            <RefreshCw
-              size={14}
-              style={{ marginRight: 6 }}
-            />
-            Réinitialiser
           </button>
 
           <button
@@ -621,6 +640,22 @@ export function Admin({
           </button>
         </div>
       </div>
+
+      {loadError && (
+        <div role="alert" style={{ marginBottom: 18, padding: "12px 16px", borderRadius: 12, background: "rgba(229,83,75,0.15)", border: `1px solid ${COLORS.red}`, color: COLORS.text, fontSize: 14, display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <span>{loadError}</span>
+          <button onClick={() => void load()} style={btnGhost}>Réessayer</button>
+        </div>
+      )}
+
+      {notice && (
+        <div role="status" style={{ marginBottom: 18, padding: "12px 16px", borderRadius: 12, background: notice.kind === "ok" ? "rgba(51,197,142,0.12)" : "rgba(229,83,75,0.15)", border: `1px solid ${notice.kind === "ok" ? COLORS.green : COLORS.red}`, color: COLORS.text, fontSize: 14, display: "flex", justifyContent: "space-between", gap: 12 }}>
+          <span>{notice.text}</span>
+          <button onClick={() => setNotice(null)} style={{ ...btnGhost, padding: 4, border: "none" }} aria-label="Fermer">
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {/* FILTRES */}
 
@@ -685,6 +720,17 @@ export function Admin({
             />
           </>
         )}
+
+        <div style={{ position: "relative", flex: "1 1 220px", maxWidth: 360 }}>
+          <Search size={14} color={COLORS.textMuted} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" }} />
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Rechercher (commentaire, réponse, date…)"
+            style={{ ...inputStyle, width: "100%", paddingLeft: 32 }}
+          />
+        </div>
       </div>
 
       {/* STATISTIQUES */}
@@ -713,13 +759,13 @@ export function Admin({
 
         <StatCard
           label="Accueil (moy. /5)"
-          value={avg("accueil")}
+          value={avgAccueil}
           color={COLORS.gold}
         />
 
         <StatCard
           label="Coffee Lounge (moy. /5)"
-          value={avg("lounge")}
+          value={avgLounge}
           color={COLORS.gold}
         />
 
@@ -950,18 +996,18 @@ export function Admin({
           >
             {filtered
               .filter((r) => r.commentaire)
-              .slice()
-              .reverse()
               .slice(0, 12)
               .map((r) => (
                 <div
                   key={r.id}
+                  onClick={() => setSelected(r)}
                   style={{
                     padding: "10px 14px",
                     borderRadius: 10,
                     background: COLORS.panel2,
                     color: COLORS.text,
                     fontSize: 14,
+                    cursor: "pointer",
                   }}
                 >
                   <div
@@ -971,9 +1017,7 @@ export function Admin({
                       marginBottom: 4,
                     }}
                   >
-                    {new Date(
-                      r.timestamp
-                    ).toLocaleString("fr-FR")}
+                    {formatDate(r.timestamp)}
                   </div>
 
                   {r.commentaire}
@@ -995,6 +1039,139 @@ export function Admin({
           </div>
         </div>
       </Chrome>
+
+      {/* LISTE DES RÉPONSES */}
+
+      <div style={{ marginTop: 18 }}>
+        <Chrome>
+          <div style={{ padding: 20 }}>
+            <div style={chartTitle}>
+              Réponses ({filtered.length})
+            </div>
+            <div style={{ ...mutedText, marginTop: 4, marginBottom: 10 }}>
+              Touchez une réponse pour voir le détail ou la supprimer.
+            </div>
+
+            <div style={{ display: "grid", gap: 8 }}>
+              {filtered.slice(0, listLimit).map((r) => (
+                <button
+                  key={r.id}
+                  onClick={() => setSelected(r)}
+                  style={{
+                    textAlign: "left",
+                    padding: "10px 14px",
+                    borderRadius: 10,
+                    background: COLORS.panel2,
+                    border: "1px solid rgba(255,255,255,0.06)",
+                    color: COLORS.text,
+                    fontSize: 13,
+                    cursor: "pointer",
+                    display: "grid",
+                    gridTemplateColumns: "minmax(130px, auto) 1fr",
+                    gap: 12,
+                  }}
+                >
+                  <span style={{ color: COLORS.textMuted }}>{formatDate(r.timestamp)}</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    Accueil {r.accueil ?? "–"}/5 · {label(r.lavage) || "–"} · {label(r.attente) || "–"} · Lounge {r.lounge ?? "–"}/5 · Reco. {label(r.nps) || "–"}
+                    {r.commentaire ? ` · « ${r.commentaire} »` : ""}
+                  </span>
+                </button>
+              ))}
+
+              {!loading && filtered.length === 0 && (
+                <div style={{ color: COLORS.textMuted, fontSize: 14 }}>
+                  Aucune réponse ne correspond aux filtres.
+                </div>
+              )}
+
+              {filtered.length > listLimit && (
+                <button onClick={() => setListLimit((n) => n + 50)} style={{ ...btnGhost, justifyContent: "center" }}>
+                  Afficher plus ({filtered.length - listLimit} restante(s))
+                </button>
+              )}
+            </div>
+          </div>
+        </Chrome>
+      </div>
+
+      {/* DONNÉES LOCALES, MIGRATION ET SAUVEGARDE */}
+
+      <div style={{ marginTop: 18 }}>
+        <Chrome>
+          <div style={{ padding: 20 }}>
+            <div style={{ ...chartTitle, display: "flex", alignItems: "center", gap: 8 }}>
+              <Database size={16} color={COLORS.blue} /> Données locales (SQLite)
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16, marginTop: 12 }}>
+              <div style={{ color: COLORS.text, fontSize: 13, lineHeight: 1.7 }}>
+                <div><strong>{status?.localCount ?? "…"}</strong> réponse(s) enregistrée(s) sur l'appareil</div>
+                {status && (
+                  <div style={mutedText}>
+                    {status.countsBySource.local} saisie(s) locale(s) · {status.countsBySource.supabase} historique(s) · {status.countsBySource.legacy_offline} de l'ancienne file hors ligne · {status.countsBySource.backup} restaurée(s)
+                  </div>
+                )}
+                <div style={mutedText}>Schéma v{status?.schemaVersion ?? "…"}</div>
+              </div>
+
+              <div style={{ color: COLORS.text, fontSize: 13, lineHeight: 1.7 }}>
+                {hist && hist.status !== "never" && (
+                  <div>
+                    Données historiques : <strong>{IMPORT_STATUS_LABEL[hist.status]}</strong>
+                    <div style={mutedText}>
+                      {hist.inserted} intégrée(s) sur {hist.remoteCount ?? hist.fetched}
+                      {hist.alreadyPresent ? `, ${hist.alreadyPresent} déjà présente(s)` : ""}
+                      {hist.skippedDeleted ? `, ${hist.skippedDeleted} supprimée(s) volontairement` : ""}
+                      {hist.errors.length ? ` — ${hist.errors.join(" ")}` : ""}
+                    </div>
+                  </div>
+                )}
+                {legacy && legacy.status !== "never" && (
+                  <div style={mutedText}>
+                    Ancienne file hors ligne : {IMPORT_STATUS_LABEL[legacy.status]} ({legacy.fetched} trouvée(s), {legacy.inserted} ajoutée(s))
+                    {legacy.errors.length ? ` — ${legacy.errors.join(" ")}` : ""}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 16 }}>
+              <button onClick={handleBackup} disabled={busy != null || loading} style={{ ...btnGhost, opacity: busy ? 0.5 : 1 }}>
+                <Download size={14} style={{ marginRight: 6 }} />
+                {busy === "backup" ? "Sauvegarde…" : "Sauvegarde complète (JSON)"}
+              </button>
+              <button onClick={() => fileInput.current?.click()} disabled={busy != null || loading} style={{ ...btnGhost, opacity: busy ? 0.5 : 1 }}>
+                <Upload size={14} style={{ marginRight: 6 }} />
+                {busy === "restore" ? "Restauration…" : "Restaurer une sauvegarde"}
+              </button>
+              <input
+                ref={fileInput}
+                type="file"
+                accept="application/json,.json"
+                style={{ display: "none" }}
+                onChange={(e) => void handleRestoreFile(e.target.files?.[0])}
+              />
+            </div>
+
+            <div style={{ ...mutedText, marginTop: 14, lineHeight: 1.6 }}>
+              ⚠️ Les réponses sont stockées uniquement sur cet appareil. Elles sont perdues si l'application est
+              désinstallée, si ses données sont effacées ou si l'appareil est perdu. Faites régulièrement une
+              sauvegarde complète (JSON) et conservez-la hors de la tablette. Les exports PDF et Excel servent à la
+              consultation et ne remplacent pas cette sauvegarde.
+            </div>
+          </div>
+        </Chrome>
+      </div>
+
+      {selected && (
+        <DetailModal
+          row={selected}
+          onClose={() => setSelected(null)}
+          onDelete={() => void handleDelete(selected)}
+          deleting={busy === "delete"}
+        />
+      )}
     </div>
   );
 }
