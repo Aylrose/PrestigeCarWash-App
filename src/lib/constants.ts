@@ -14,7 +14,11 @@ export const COLORS = {
   textMuted: "#8DA0AF",
 } as const;
 
-export const ADMIN_PASSWORD = "";
+/**
+ * Mot de passe du tableau de bord, défini HORS du dépôt dans .env.local
+ * (VITE_ADMIN_PASSWORD=...) et intégré à la compilation. Voir .env.example.
+ */
+export const ADMIN_PASSWORD = (import.meta.env.VITE_ADMIN_PASSWORD as string | undefined) || "";
 export const TOTAL_QUESTIONS = 7;
 
 export const nowISO = () => new Date().toISOString();

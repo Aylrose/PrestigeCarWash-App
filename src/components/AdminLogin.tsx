@@ -8,7 +8,8 @@ export function AdminLogin({ onAuth, onClose }: { onAuth: () => void; onClose: (
   const [error, setError] = useState(false);
 
   const submit = () => {
-    if (pwd === ADMIN_PASSWORD) onAuth();
+    // Sans mot de passe configuré à la compilation, l'accès reste fermé.
+    if (ADMIN_PASSWORD && pwd === ADMIN_PASSWORD) onAuth();
     else setError(true);
   };
 
@@ -36,7 +37,7 @@ export function AdminLogin({ onAuth, onClose }: { onAuth: () => void; onClose: (
               Entrer
             </button>
             <div style={{ color: COLORS.textMuted, fontSize: 11, marginTop: 14 }}>
-              {/*Démo : mot de passe <code></code> */}
+              {!ADMIN_PASSWORD && "Mot de passe administrateur non configuré (voir .env.example)."}
             </div>
           </div>
         </Chrome>
